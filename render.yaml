@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: signup-flow-playwright-harness
+    runtime: python
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
