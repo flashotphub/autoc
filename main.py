@@ -75,7 +75,7 @@ async def run_batch(request: Request):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             for i in range(req.count):
-                email = f"qa.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.{i+1}.{''.join(random.choices(string.ascii_lowercase+string.digits,k=5))}@example.com"
+                email = f"qa.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.{i+1}.{''.join(random.choices(string.ascii_lowercase+string.digits,k=5))}@gmail.com"
                 name = random.choice(NAMES) + " " + random.choice(["Das", "Roy", "Sen", "Dutta", "Mondal", "Paul"])
                 context = await browser.new_context()
                 page = await context.new_page()
@@ -89,13 +89,19 @@ async def run_batch(request: Request):
                     # Populate only existing referral-related storage keys; don't invent unknown app-specific keys.
                     referral_keys = [k for k in storage_before if any(s in k.lower() for s in ("refer", "referrer", "invite", "affiliate"))]
                     if req.referral_code:
-                        for key in referral_keys:
-                            if "code" in key.lower() or "refer" in key.lower() or "invite" in key.lower():
-                                await page.evaluate("([k,v]) => localStorage.setItem(k,v)", [key, req.referral_code])
+                        key = "paid2watch:referral_code"
+                        if key in storage_before:
+                            await page.evaluate(
+                                "([k, v]) => localStorage.setItem(k, v)",
+                                [key, req.referral_code]
+                            )
                     if req.referrer_id:
-                        for key in referral_keys:
-                            if "id" in key.lower() or "referrer" in key.lower() or "affiliate" in key.lower():
-                                await page.evaluate("([k,v]) => localStorage.setItem(k,v)", [key, req.referrer_id])
+                        key = "paid2watch:referrer_id"
+                        if key in storage_before:
+                            await page.evaluate(
+                                "([k, v]) => localStorage.setItem(k, v)",
+                                [key, req.referrer_id]
+                            )
                     storage_after = await page.evaluate("() => Object.fromEntries(Object.entries(localStorage))")
                     await page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=60000)
                     await page.locator("#display-name").fill(name, timeout=15000)
