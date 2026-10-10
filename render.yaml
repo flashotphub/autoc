@@ -1,7 +1,8 @@
+
 services:
   - type: web
     name: signup-qa-studio
-    runtime: python
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
