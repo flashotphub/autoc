@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, EmailStr
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 BASE_DIR = Path(__file__).resolve().parent
-app = FastAPI(title="Signup QA Studio", version="2.2.0")
+app = FastAPI(title="Signup QA Studio", version="2.3.0")
 
 # MOCK-ONLY QA: this service never contacts paid2watch.co or api.appzmagic.com.
 events = deque(maxlen=500)
@@ -53,9 +53,9 @@ def home():
 def health():
     return {
         "ok": True,
-        "mode": "mock-only",
-        "external_signup_enabled": False,
-        "browser_automation": "Playwright Chromium headless on Render",
+        "mode": "mock-tests-plus-single-owner-qa-run",
+        "external_signup_enabled": True,
+        "browser_automation": "Playwright Chromium headless on Render; CAPTCHA is not bypassed",
     }
 
 
@@ -176,6 +176,111 @@ def reset_mock():
     events.clear()
     request_times.clear()
     return {"ok": True, "message": "Mock test data cleared."}
+
+
+class LiveSignupTestPayload(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+    display_name: str = Field(min_length=1, max_length=60)
+
+
+@app.post("/api/browser/signup-test")
+async def live_signup_test(payload: LiveSignupTestPayload):
+    """Run one owner-authorized browser test against the configured signup flow.
+
+    This does not bypass CAPTCHA. If CAPTCHA blocks automated submission, the
+    response reports that outcome for the site owner to inspect. Passwords are
+    never written to event logs or returned in the response.
+    """
+    _check_rate_limit()
+    run_id = uuid.uuid4().hex[:10]
+    browser = None
+    result = {
+        "ok": False,
+        "run_id": run_id,
+        "mode": "single-site-owner-qa-test",
+        "referral_url": "https://paid2watch.co/r/78jnd",
+        "signup_url": "https://paid2watch.co/#/signup",
+        "email": str(payload.email).lower(),
+    }
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            console_errors = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)[:250]))
+
+            await page.goto(result["referral_url"], wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(1500)
+            referral_storage = await page.evaluate("""() => {
+                const entries = Object.entries(localStorage);
+                return Object.fromEntries(entries.filter(([k]) =>
+                    /refer|referrer|invite|affiliate|source/i.test(k)
+                ));
+            }""")
+            all_storage_keys = await page.evaluate("() => Object.keys(localStorage)")
+
+            await page.goto(result["signup_url"], wait_until="domcontentloaded", timeout=60000)
+            await page.locator("#display-name").fill(payload.display_name)
+            await page.locator("#email").fill(str(payload.email))
+            await page.locator("#password").fill(payload.password)
+
+            captcha_detected = await page.locator(
+                'iframe[src*="captcha" i], iframe[src*="recaptcha" i], iframe[src*="challenges.cloudflare.com" i], [data-sitekey], input[name*="captcha" i]'
+            ).count() > 0
+            before_url = page.url
+            await page.get_by_role("button", name="Create free account").click(timeout=15000)
+            await page.wait_for_timeout(3500)
+
+            body_text = (await page.locator("body").inner_text())[:2500]
+            # Look for visible validation / CAPTCHA indicators without guessing success.
+            lower_text = body_text.lower()
+            captcha_blocked = captcha_detected and any(term in lower_text for term in [
+                "captcha", "verify you are human", "verification required", "complete the challenge"
+            ])
+            success_indicators = any(term in lower_text for term in [
+                "account created", "signup successful", "registration successful", "welcome"
+            ])
+            error_indicators = any(term in lower_text for term in [
+                "invalid", "required", "already exists", "failed", "try again", "error"
+            ])
+            result.update({
+                "ok": bool(success_indicators and not captcha_blocked),
+                "final_url": page.url,
+                "url_changed": page.url != before_url,
+                "referral_storage": referral_storage,
+                "local_storage_keys": all_storage_keys,
+                "captcha_detected_before_submit": captcha_detected,
+                "captcha_blocked_or_requested": captcha_blocked,
+                "success_text_detected": success_indicators,
+                "validation_or_error_text_detected": error_indicators,
+                "page_text_excerpt": body_text,
+                "page_errors": console_errors[:10],
+                "message": (
+                    "Success-like text detected; verify the new test account in your admin/database." if success_indicators and not captcha_blocked
+                    else "CAPTCHA appears to be blocking or requesting verification; this headless test does not bypass it." if captcha_blocked or captcha_detected
+                    else "Form submitted; inspect page_text_excerpt and page_errors to determine the site response."
+                ),
+            })
+            events.appendleft({
+                "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "email": str(payload.email).lower(),
+                "name": payload.display_name,
+                "result": "live-test-success-like" if result["ok"] else "live-test-needs-review",
+                "source_app": "playwright-owner-qa",
+                "referral_code": None,
+                "referrer_id": None,
+                "request_id": run_id,
+            })
+    except PlaywrightTimeoutError as exc:
+        result["error"] = f"Browser timeout: {str(exc)[:250]}"
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {str(exc)[:350]}"
+    finally:
+        if browser:
+            await browser.close()
+    return result
 
 
 @app.post("/api/test/browser-run")
